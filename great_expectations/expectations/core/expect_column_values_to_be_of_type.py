@@ -18,6 +18,7 @@ from great_expectations.compatibility.bigquery import (
 )
 from great_expectations.compatibility.sqlalchemy import sqlalchemy as sa
 from great_expectations.compatibility.typing_extensions import override
+from great_expectations.core.metric_function_types import SummarizationMetricNameSuffixes
 from great_expectations.core.suite_parameters import (
     SuiteParameterDict,  # noqa: TC001 # FIXME CoP
 )
@@ -26,9 +27,11 @@ from great_expectations.execution_engine.sqlalchemy_dialect import (
 )
 from great_expectations.expectations.expectation import (
     ColumnMapExpectation,
+    _format_map_output,
     _style_row_condition,
     render_suite_parameter_string,
 )
+from great_expectations.expectations.expectation_configuration import parse_result_format
 from great_expectations.expectations.metadata_types import DataQualityIssues, SupportedDataSources
 from great_expectations.expectations.model_field_descriptions import (
     COLUMN_DESCRIPTION,
@@ -575,6 +578,38 @@ class ExpectColumnValuesToBeOfType(ColumnMapExpectation):
             ),
         )
 
+        # add table.row_count and nonnull count so aggregate paths can build full map-format results
+        row_count_metric_kwargs = get_metric_kwargs(
+            metric_name="table.row_count",
+            configuration=configuration,
+            runtime_configuration=runtime_configuration,
+        )
+        validation_dependencies.set_metric_configuration(
+            metric_name="table.row_count",
+            metric_configuration=MetricConfiguration(
+                metric_name="table.row_count",
+                metric_domain_kwargs=row_count_metric_kwargs["metric_domain_kwargs"],
+                metric_value_kwargs=row_count_metric_kwargs["metric_value_kwargs"],
+            ),
+        )
+
+        nonnull_metric_name = (
+            f"column_values.nonnull.{SummarizationMetricNameSuffixes.UNEXPECTED_COUNT.value}"
+        )
+        nonnull_metric_kwargs = get_metric_kwargs(
+            metric_name=nonnull_metric_name,
+            configuration=configuration,
+            runtime_configuration=runtime_configuration,
+        )
+        validation_dependencies.set_metric_configuration(
+            metric_name=nonnull_metric_name,
+            metric_configuration=MetricConfiguration(
+                metric_name=nonnull_metric_name,
+                metric_domain_kwargs=nonnull_metric_kwargs["metric_domain_kwargs"],
+                metric_value_kwargs=nonnull_metric_kwargs["metric_value_kwargs"],
+            ),
+        )
+
         return validation_dependencies
 
     @override
@@ -611,19 +646,58 @@ class ExpectColumnValuesToBeOfType(ColumnMapExpectation):
             ]:
                 # this calls ColumnMapMetric._validate
                 return super()._validate(metrics, runtime_configuration, execution_engine)
-            return self._validate_pandas(
+            inner_result = self._validate_pandas(
                 actual_column_type=actual_column_type, expected_type=expected_type
             )
         elif isinstance(execution_engine, SqlAlchemyExecutionEngine):
-            return self._validate_sqlalchemy(
+            inner_result = self._validate_sqlalchemy(
                 actual_column_type=actual_column_type,
                 expected_type=expected_type,
                 execution_engine=execution_engine,
             )
         elif isinstance(execution_engine, SparkDFExecutionEngine):
-            return self._validate_spark(
+            inner_result = self._validate_spark(
                 actual_column_type=actual_column_type, expected_type=expected_type
             )
+        else:
+            return {}
+
+        return self._build_map_result(inner_result, metrics, runtime_configuration)
+
+    def _build_map_result(
+        self,
+        inner_result: Dict,
+        metrics: Dict,
+        runtime_configuration: Optional[dict],
+    ) -> Dict:
+        """Wrap an aggregate type-check result in the standard ColumnMapExpectation format."""
+        result_format = self._get_result_format(runtime_configuration=runtime_configuration)
+        parsed_result_format = parse_result_format(result_format)
+
+        success = inner_result["success"]
+        observed_value = inner_result["result"]["observed_value"]
+
+        total_count = metrics.get("table.row_count")
+        null_count = metrics.get(
+            f"column_values.nonnull.{SummarizationMetricNameSuffixes.UNEXPECTED_COUNT.value}"
+        )
+        nonnull_count = (
+            (total_count - null_count)
+            if (total_count is not None and null_count is not None)
+            else None
+        )
+        unexpected_count = 0 if success else nonnull_count
+
+        result = _format_map_output(
+            result_format=parsed_result_format,
+            success=success,
+            element_count=total_count,
+            nonnull_count=nonnull_count,
+            unexpected_count=unexpected_count,
+            unexpected_list=[],
+        )
+        result["result"]["observed_value"] = observed_value
+        return result
 
 
 def _get_potential_sqlalchemy_types(execution_engine, expected_type):

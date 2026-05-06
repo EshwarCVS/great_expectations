@@ -229,3 +229,53 @@ def test_include_unexpected_rows_pandas(batch_for_datasource: Batch) -> None:
     # The unexpected rows should contain all the string values
     unexpected_values = sorted(unexpected_rows_df[STRING_COLUMN].tolist())
     assert unexpected_values == ["a", "b", "c", "d", "e"]
+
+
+@parameterize_batch_for_data_sources(data_source_configs=JUST_PANDAS_DATA_SOURCES, data=DATA)
+def test_result_format_fields_on_success(batch_for_datasource: Batch) -> None:
+    """Non-object Pandas column should return full map-format result fields on success."""
+    expectation = gxe.ExpectColumnValuesToBeOfType(column=INTEGER_COLUMN, type_="int")
+    result = batch_for_datasource.validate(expectation)
+
+    assert result.success
+    result_dict = result["result"]
+    assert "element_count" in result_dict
+    assert "unexpected_count" in result_dict
+    assert "unexpected_percent" in result_dict
+    assert "partial_unexpected_list" in result_dict
+    assert "observed_value" in result_dict
+    assert result_dict["element_count"] == 5
+    assert result_dict["unexpected_count"] == 0
+    assert result_dict["unexpected_percent"] == 0.0
+
+
+@parameterize_batch_for_data_sources(data_source_configs=JUST_PANDAS_DATA_SOURCES, data=DATA)
+def test_result_format_fields_on_failure(batch_for_datasource: Batch) -> None:
+    """Non-object Pandas column should return full map-format result fields on failure."""
+    expectation = gxe.ExpectColumnValuesToBeOfType(column=INTEGER_COLUMN, type_="str")
+    result = batch_for_datasource.validate(expectation)
+
+    assert not result.success
+    result_dict = result["result"]
+    assert "element_count" in result_dict
+    assert "unexpected_count" in result_dict
+    assert "unexpected_percent" in result_dict
+    assert "missing_count" in result_dict
+    assert "observed_value" in result_dict
+    assert result_dict["element_count"] == 5
+    assert result_dict["unexpected_count"] == 5
+    assert result_dict["unexpected_percent"] == 100.0
+
+
+@parameterize_batch_for_data_sources(data_source_configs=JUST_PANDAS_DATA_SOURCES, data=DATA)
+def test_result_format_fields_with_nulls(batch_for_datasource: Batch) -> None:
+    """Columns with nulls should have correct missing_count in result."""
+    expectation = gxe.ExpectColumnValuesToBeOfType(column=INTEGER_AND_NULL_COLUMN, type_="int")
+    result = batch_for_datasource.validate(expectation)
+
+    assert result.success
+    result_dict = result["result"]
+    assert result_dict["element_count"] == 5
+    assert result_dict["unexpected_count"] == 0
+    assert result_dict["missing_count"] == 1
+    assert result_dict["missing_percent"] == 20.0
